@@ -2,6 +2,7 @@ name: Build & Push Docker Image
 
 on:
   push:
+    branches: ["bun-stream-abort-fix"]
     tags: ["v*"]
   schedule:
     # Weekly rebuild to refresh the CA certificate bundle baked into `:latest`.
