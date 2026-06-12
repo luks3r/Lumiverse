@@ -1,7 +1,8 @@
 import { getDb } from "../db/connection";
-import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry } from "../types/tokenizer";
+import type { TokenizerConfig, TokenizerModelPattern, TokenCountResult, TokenCountBreakdownEntry, TokenizerType } from "../types/tokenizer";
 import { getTextContent, type AssemblyBreakdownEntry, type LlmMessage } from "../llm/types";
 import { validateHost, SSRFError } from "../utils/safe-fetch";
+import { hfAuthHeaders } from "./huggingface.service";
 
 export interface TokenCountMessageLike {
   role: "system" | "user" | "assistant";
@@ -12,6 +13,14 @@ export interface TokenCountMessageLike {
  * Validate a tokenizer resource URL before fetching. Owner-supplied, but still
  * should not reach private/internal hosts.
  */
+/**
+ * Deadline for fetching remote tokenizer / vocab files (one-time, then cached).
+ * Without it, a reachable-but-hung host stalls token counting on the live
+ * generation path indefinitely (a hang never throws, so the char/4 fallback
+ * would never engage). On timeout the fetch throws and the fallback kicks in.
+ */
+const TOKENIZER_FETCH_TIMEOUT_MS = 30_000;
+
 async function validateTokenizerUrl(url: string, label: string): Promise<void> {
   let parsed: URL;
   try {
@@ -188,7 +197,7 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
     // try fetching the JSON data manually and use fromPreTrained() instead of fromPreTrainedUrls()
     if (configUrl === cfg.url) {
       await validateTokenizerUrl(cfg.url, "tokenizer url");
-      const resp = await fetch(cfg.url);
+      const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
       if (!resp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${resp.status}`);
       const tokenizerJSON = await resp.json();
       const tokenizer = withoutBenignTokenizerWarning(() => TokenizerLoader.fromPreTrained({
@@ -202,9 +211,9 @@ async function loadHuggingFace(config: TokenizerConfig): Promise<TokenizerInstan
     // not the whole network request inside fromPreTrainedUrls().
     await validateTokenizerUrl(cfg.url, "tokenizer url");
     await validateTokenizerUrl(configUrl, "tokenizer config url");
-    const tokenizerResp = await fetch(cfg.url);
+    const tokenizerResp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
     if (!tokenizerResp.ok) throw new Error(`Failed to fetch tokenizer.json from ${cfg.url}: ${tokenizerResp.status}`);
-    const configResp = await fetch(configUrl);
+    const configResp = await fetch(configUrl, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(configUrl) });
     if (!configResp.ok) throw new Error(`Failed to fetch tokenizer_config.json from ${configUrl}: ${configResp.status}`);
     const tokenizerJSON = await tokenizerResp.json();
     const tokenizerConfig = await configResp.json();
@@ -261,7 +270,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   if (!cfg.url) throw new Error("Tiktoken requires 'url' in config pointing to .model file");
 
   await validateTokenizerUrl(cfg.url, "tiktoken model url");
-  const resp = await fetch(cfg.url);
+  const resp = await fetch(cfg.url, { signal: AbortSignal.timeout(TOKENIZER_FETCH_TIMEOUT_MS), headers: await hfAuthHeaders(cfg.url) });
   if (!resp.ok) throw new Error(`Failed to fetch tiktoken model from ${cfg.url}`);
   const rawBpe = await resp.text();
 
@@ -279,7 +288,7 @@ async function loadTiktoken(config: TokenizerConfig): Promise<TokenizerInstance>
   if (cfg.configUrl) {
     try {
       await validateTokenizerUrl(cfg.configUrl, "tiktoken config url");
-      const configResp = await fetch(cfg.configUrl);
+      const configResp = await fetch(cfg.configUrl, { headers: await hfAuthHeaders(cfg.configUrl) });
       if (configResp.ok) {
         const configData = await configResp.json();
         if (configData.added_tokens_decoder) {
@@ -337,6 +346,35 @@ export async function countForModel(modelId: string, text: string): Promise<numb
 export async function countWithTokenizer(tokenizerId: string, text: string): Promise<number> {
   const instance = await getInstance(tokenizerId);
   return instance.count(text);
+}
+
+/**
+ * Attempt to load an ad-hoc tokenizer config (without persisting it or touching
+ * the instance cache) and run a sample encode. Used by the "resolve from repo"
+ * flow to prove a tokenizer is actually usable before we install it — file
+ * existence alone doesn't catch SentencePiece-only repos or custom formats our
+ * loaders can't parse (e.g. Grok's `tokenizer.tok.json`).
+ */
+export async function verifyConfig(
+  type: TokenizerType,
+  config: Record<string, any>
+): Promise<{ ok: true; sampleTokens: number } | { ok: false; error: string }> {
+  const synthetic: TokenizerConfig = {
+    id: "__verify__",
+    name: "__verify__",
+    type,
+    config: config || {},
+    is_built_in: false,
+    created_at: 0,
+    updated_at: 0,
+  };
+  try {
+    const instance = await loadTokenizer(synthetic);
+    const sampleTokens = instance.count("The quick brown fox jumps over the lazy dog.");
+    return { ok: true, sampleTokens };
+  } catch (err: any) {
+    return { ok: false, error: err?.message || String(err) };
+  }
 }
 
 export function flattenMessagesForTokenCount(messages: TokenCountMessageLike[]): string {

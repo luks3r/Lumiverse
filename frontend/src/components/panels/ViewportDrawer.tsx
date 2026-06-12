@@ -151,7 +151,6 @@ export default function ViewportDrawer() {
 
   const panelWidthCSS = (() => {
     switch (drawerSettings.panelWidthMode) {
-      case 'stChat': return '376px'
       case 'custom': return `${Math.max(20, Math.min(80, drawerSettings.customPanelWidth))}vw`
       default: return 'min(420px, calc(100vw - 64px))'
     }
@@ -216,6 +215,7 @@ export default function ViewportDrawer() {
                       onTouchStart={tabQuickMenu.onTouchStart}
                       onTouchMove={tabQuickMenu.onTouchMove}
                       onTouchEnd={tabQuickMenu.onTouchEnd}
+                      onTouchCancel={tabQuickMenu.onTouchCancel}
                       title={translateDrawerField(tab.id, 'tabName', tab.tabName)}
                     >
                       <Icon size={20} strokeWidth={1.5} />
@@ -239,6 +239,7 @@ export default function ViewportDrawer() {
                           onTouchStart={tabQuickMenu.onTouchStart}
                           onTouchMove={tabQuickMenu.onTouchMove}
                           onTouchEnd={tabQuickMenu.onTouchEnd}
+                          onTouchCancel={tabQuickMenu.onTouchCancel}
                           title={dt.title}
                         >
                           {dt.iconSvg ? (

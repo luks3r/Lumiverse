@@ -6,6 +6,7 @@ export enum EventType {
   CHAT_CHANGED = "CHAT_CHANGED",
   CHAT_SWITCHED = "CHAT_SWITCHED",
   CHAT_DELETED = "CHAT_DELETED",
+  CHAT_FORKED = "CHAT_FORKED",
   MESSAGE_SENT = "MESSAGE_SENT",
   MESSAGE_EDITED = "MESSAGE_EDITED",
   MESSAGE_DELETED = "MESSAGE_DELETED",
@@ -129,11 +130,17 @@ export enum EventType {
   // Theme overrides (Spindle extensions)
   SPINDLE_THEME_OVERRIDES = "SPINDLE_THEME_OVERRIDES",
 
+  // Per-chat CSS containment mode (Spindle extensions, app_manipulation)
+  SPINDLE_CHAT_STYLE_MODE = "SPINDLE_CHAT_STYLE_MODE",
+
   // Spindle permission changes (broadcast with extensionId so frontends can scope)
   SPINDLE_PERMISSION_CHANGED = "SPINDLE_PERMISSION_CHANGED",
 
   // Spindle command palette commands
   SPINDLE_COMMANDS_CHANGED = "SPINDLE_COMMANDS_CHANGED",
+
+  // Spindle UI automation (navigate drawer/settings/command palette)
+  SPINDLE_UI_NAVIGATE = "SPINDLE_UI_NAVIGATE",
 
   // Import progress
   IMPORT_GALLERY_PROGRESS = "IMPORT_GALLERY_PROGRESS",
@@ -185,8 +192,12 @@ export enum EventType {
 
   // Loom summary auto-summarization
   SUMMARIZATION_STARTED = "SUMMARIZATION_STARTED",
+  SUMMARIZATION_PROGRESS = "SUMMARIZATION_PROGRESS",
   SUMMARIZATION_COMPLETED = "SUMMARIZATION_COMPLETED",
   SUMMARIZATION_FAILED = "SUMMARIZATION_FAILED",
+
+  // System health
+  SYSTEM_DISK_LOW = "SYSTEM_DISK_LOW",
 }
 
 export interface EventMessage {

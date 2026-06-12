@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 
 import { cleanupStreamReader, fetchWithPreflightAbort } from "./stream-utils";
 

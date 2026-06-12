@@ -79,7 +79,7 @@ async function resolveCortexParticipants(userId: string, chat: ReturnType<typeof
 
   if (!chat) return { characterNames, descriptionAliases: undefined as Map<string, string> | undefined };
 
-  const character = getCharacter(userId, chat.character_id);
+  const character = chat.character_id ? getCharacter(userId, chat.character_id) : null;
   if (character) {
     const normalized = memoryCortex.normalizeCharacterName(character.name);
     characterNames.push(normalized);
@@ -404,6 +404,17 @@ async function warmLongTermChatMemory(options: {
   if (resumedChunks > 0) {
     return { status: "complete", reason: "chat_memory_warmup_resumed" };
   }
+
+  // Fully vectorized, nothing to (re)build or resume. Sweep any orphaned
+  // vectors a past rebuild/vectorization race may have left behind so
+  // existing duplicate memory-injection entries self-heal on chat open.
+  // Fire-and-forget to keep the warmup fast path snappy.
+  const liveChunkIds = (getDb()
+    .query("SELECT id FROM chat_chunks WHERE chat_id = ?")
+    .all(chatId) as Array<{ id: string }>).map((r) => r.id);
+  void embeddingsSvc
+    .reconcileChatChunkEmbeddings(userId, chatId, liveChunkIds)
+    .catch((err) => console.warn("[memory-cortex] Orphan reconcile failed:", err));
 
   return { status: "skipped", reason: "chat_memory_already_fresh" };
 }
@@ -1211,7 +1222,7 @@ app.put("/chats/:chatId/entities/:entityId", async (c) => {
   const params: any[] = [];
 
   if (body.name !== undefined) { updates.push("name = ?"); params.push(body.name); }
-  if (body.entity_type !== undefined) { updates.push("entity_type = ?"); params.push(body.entity_type); }
+  if (body.entityType !== undefined) { updates.push("entity_type = ?"); params.push(body.entityType); }
   if (body.aliases !== undefined) { updates.push("aliases = ?"); params.push(JSON.stringify(body.aliases)); }
   if (body.description !== undefined) { updates.push("description = ?"); params.push(body.description); }
   if (body.facts !== undefined) { updates.push("facts = ?"); params.push(JSON.stringify(body.facts)); }
@@ -1228,6 +1239,17 @@ app.put("/chats/:chatId/entities/:entityId", async (c) => {
   // Scope WHERE by chat_id as defense-in-depth: even if a global entity ID leaks,
   // the chat-ownership gate above plus this filter prevents cross-chat writes.
   db.query(`UPDATE memory_entities SET ${updates.join(", ")} WHERE id = ? AND chat_id = ?`).run(...params);
+
+  if (body.aliases && Array.isArray(body.aliases)) {
+    for (const alias of body.aliases) {
+      if (typeof alias !== "string" || !alias.trim()) continue;
+      const mergeResult = memoryCortex.checkAndAutoMerge(chatId, entityId, alias.trim());
+      if (mergeResult && mergeResult !== entityId) {
+        const survivor = memoryCortex.getEntities(chatId).find((e) => e.id === mergeResult);
+        return c.json({ ...survivor, merged: true, mergedInto: mergeResult });
+      }
+    }
+  }
 
   const updated = memoryCortex.getEntities(chatId).find((e) => e.id === entityId);
   return c.json(updated);
@@ -1268,54 +1290,10 @@ app.post("/chats/:chatId/entities/merge", async (c) => {
 
   if (!source || !target) return c.json({ error: "One or both entities not found" }, 404);
 
-  const { getDb } = require("../db/connection");
-  const db = getDb();
+  memoryCortex.mergeEntitiesInternal(sourceId, targetId);
+
   const now = Math.floor(Date.now() / 1000);
-
-  db.transaction(() => {
-    // Merge aliases (source name becomes an alias on target)
-    const targetAliases = [...target.aliases];
-    if (!targetAliases.includes(source.name)) targetAliases.push(source.name);
-    for (const alias of source.aliases) {
-      if (!targetAliases.includes(alias)) targetAliases.push(alias);
-    }
-
-    // Merge facts (deduplicated)
-    const targetFacts = [...target.facts];
-    const lowerFacts = new Set(targetFacts.map((f) => f.toLowerCase()));
-    for (const fact of source.facts) {
-      if (!lowerFacts.has(fact.toLowerCase())) {
-        targetFacts.push(fact);
-      }
-    }
-
-    // Update target entity
-    db.query(
-      `UPDATE memory_entities SET
-        aliases = ?, facts = ?,
-        mention_count = mention_count + ?,
-        salience_avg = MAX(salience_avg, ?),
-        updated_at = ?,
-        user_edited_at = ?
-       WHERE id = ?`,
-    ).run(
-      JSON.stringify(targetAliases), JSON.stringify(targetFacts.slice(-20)),
-      source.mentionCount, source.salienceAvg, now, now, targetId,
-    );
-
-    // Re-point all source mentions to target
-    db.query("UPDATE memory_mentions SET entity_id = ? WHERE entity_id = ?")
-      .run(targetId, sourceId);
-
-    // Re-point all source relations to target
-    db.query("UPDATE memory_relations SET source_entity_id = ? WHERE source_entity_id = ?")
-      .run(targetId, sourceId);
-    db.query("UPDATE memory_relations SET target_entity_id = ? WHERE target_entity_id = ?")
-      .run(targetId, sourceId);
-
-    // Delete source entity
-    db.query("DELETE FROM memory_entities WHERE id = ?").run(sourceId);
-  })();
+  getDb().query("UPDATE memory_entities SET user_edited_at = ? WHERE id = ?").run(now, targetId);
 
   const merged = memoryCortex.getEntities(chatId).find((e) => e.id === targetId);
   return c.json(merged);
@@ -1440,12 +1418,19 @@ app.put("/chats/:chatId/colors/:id", async (c) => {
 
 // ─── Relations ─────────────────────────────────────────────────
 
-/** GET /chats/:chatId/relations — List relations with resolved entity names */
+/** GET /chats/:chatId/relations — List relations with resolved entity names.
+ *  Query params:
+ *    ?includeInactive=true — include dormant, broken, and former relations (default: true)
+ */
 app.get("/chats/:chatId/relations", (c) => {
   const chatId = c.req.param("chatId");
   const owned = ensureChatOwnership(c, chatId);
   if (!owned.ok) return owned.response;
-  const relations = memoryCortex.getRelations(chatId);
+
+  const includeInactive = c.req.query("includeInactive") !== "false";
+  const relations = includeInactive
+    ? memoryCortex.getRelationsIncludingInactive(chatId)
+    : memoryCortex.getRelations(chatId);
 
   // Resolve entity names for display
   const { getDb } = require("../db/connection");

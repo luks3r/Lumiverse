@@ -58,8 +58,14 @@ export enum EventType {
   // Spindle command palette commands
   SPINDLE_COMMANDS_CHANGED = 'SPINDLE_COMMANDS_CHANGED',
 
+  // Spindle UI automation (extension navigates the user to a tab/settings/etc.)
+  SPINDLE_UI_NAVIGATE = 'SPINDLE_UI_NAVIGATE',
+
   // Spindle theme overrides
   SPINDLE_THEME_OVERRIDES = 'SPINDLE_THEME_OVERRIDES',
+
+  // Per-chat CSS containment mode (Spindle, app_manipulation)
+  SPINDLE_CHAT_STYLE_MODE = 'SPINDLE_CHAT_STYLE_MODE',
 
   // Spindle text editor
   SPINDLE_TEXT_EDITOR_OPEN = 'SPINDLE_TEXT_EDITOR_OPEN',
@@ -141,8 +147,22 @@ export enum EventType {
 
   // Loom summary auto-summarization
   SUMMARIZATION_STARTED = 'SUMMARIZATION_STARTED',
+  SUMMARIZATION_PROGRESS = 'SUMMARIZATION_PROGRESS',
   SUMMARIZATION_COMPLETED = 'SUMMARIZATION_COMPLETED',
   SUMMARIZATION_FAILED = 'SUMMARIZATION_FAILED',
+
+  // System health
+  SYSTEM_DISK_LOW = 'SYSTEM_DISK_LOW',
+}
+
+export interface SystemDiskLowPayload {
+  path: string
+  /** 0..1, e.g. 0.93 = 93% full */
+  usagePercent: number
+  freeBytes: number
+  totalBytes: number
+  /** 0..1, the threshold that was crossed */
+  thresholdPercent: number
 }
 
 export interface SummarizationStartedPayload {
@@ -154,6 +174,15 @@ export interface SummarizationStartedPayload {
 export interface SummarizationCompletedPayload {
   chatId: string
   generationId: string
+  summaryText?: string
+}
+
+export interface SummarizationProgressPayload {
+  chatId: string
+  generationId: string
+  batchNumber: number
+  totalBatches: number
+  messagesProcessed: number
 }
 
 export interface SummarizationFailedPayload {
@@ -213,7 +242,15 @@ export interface StreamTokenPayload {
   chatId: string
   token: string
   type?: 'text' | 'reasoning'
+  // seq is the tokenSeq of the LAST token coalesced into this segment; startSeq
+  // is the FIRST. Retained for Spindle extensions; reconciliation now uses
+  // `offset` instead.
   seq?: number
+  startSeq?: number
+  // Char position of this segment's start within the server's cumulative
+  // buffer for its stream type (content vs reasoning). Drives exact overlap
+  // dedupe after recovery and immediate gap detection (missed segments).
+  offset?: number
 }
 
 export interface ContextClipStats {
@@ -237,6 +274,8 @@ export interface GenerationStartedPayload {
   generationId: string
   chatId: string
   targetMessageId?: string
+  /** Swipe index the generation streams into (for swipe-gated streaming display). */
+  targetSwipeId?: number
   characterId?: string
   characterName?: string
   contextClipStats?: ContextClipStats

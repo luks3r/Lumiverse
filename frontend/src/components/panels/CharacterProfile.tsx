@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef, type CSSProperties } from 'react'
 import { useParams } from 'react-router'
+import { Marked } from 'marked'
 import { charactersApi } from '@/api/characters'
 import { chatsApi } from '@/api/chats'
 import { getCharacterAvatarLargeUrl, getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
+import { sanitizeRichHtml } from '@/lib/richHtmlSanitizer'
 import { useStore } from '@/store'
 import LazyImage from '@/components/shared/LazyImage'
 import { EditorSection } from '@/components/shared/FormComponents'
@@ -17,6 +19,13 @@ import type { Character } from '@/types/api'
 import PanelFadeIn from '@/components/shared/PanelFadeIn'
 import clsx from 'clsx'
 import styles from './CharacterProfile.module.css'
+
+const profileMarked = new Marked({ gfm: true, breaks: true })
+
+function renderProfileMarkdown(text: string): string {
+  const html = profileMarked.parse(text, { async: false }) as string
+  return sanitizeRichHtml(html)
+}
 import {
   getDreamWeaverAppearanceText,
   getDreamWeaverCharacterMetadata,
@@ -190,53 +199,54 @@ function SingleCharacterProfile({
       {/* Description */}
       {hasDreamWeaverAppearance(dreamWeaverMetadata) && (
         <EditorSection Icon={Eye} title={t('characterProfile.sections.appearance')} defaultExpanded={false}>
-          <div className={styles.fieldContent}>
-            {dreamWeaverAppearance}
-          </div>
+          <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(dreamWeaverAppearance) }} />
         </EditorSection>
       )}
 
       {/* Description */}
       <EditorSection Icon={BookOpen} title={t('characterProfile.sections.description')} defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.description || <span className={styles.placeholder}>{t('characterProfile.empty.description')}</span>}
-        </div>
+        {character.description
+          ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.description) }} />
+          : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.description')}</span></div>
+        }
       </EditorSection>
 
       {/* Personality */}
       <EditorSection Icon={Sparkles} title={t('characterProfile.sections.personality')} defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.personality || <span className={styles.placeholder}>{t('characterProfile.empty.personality')}</span>}
-        </div>
+        {character.personality
+          ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.personality) }} />
+          : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.personality')}</span></div>
+        }
       </EditorSection>
 
       {/* Scenario */}
       <EditorSection Icon={FileText} title={t('characterProfile.sections.scenario')} defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.scenario || <span className={styles.placeholder}>{t('characterProfile.empty.scenario')}</span>}
-        </div>
+        {character.scenario
+          ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.scenario) }} />
+          : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.scenario')}</span></div>
+        }
       </EditorSection>
 
       {/* First Message */}
       <EditorSection Icon={MessageSquare} title={t('characterProfile.sections.firstMessage')} defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.first_mes || <span className={styles.placeholder}>{t('characterProfile.empty.firstMessage')}</span>}
-        </div>
+        {character.first_mes
+          ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.first_mes) }} />
+          : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.firstMessage')}</span></div>
+        }
       </EditorSection>
 
       {hasDreamWeaverVoiceGuidance(dreamWeaverMetadata) && (
         <EditorSection Icon={Mic} title={t('characterProfile.sections.voiceGuidance')} defaultExpanded={false}>
-          <div className={styles.fieldContent}>
-            {dreamWeaverVoice}
-          </div>
+          <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(dreamWeaverVoice) }} />
         </EditorSection>
       )}
 
       {/* System Prompt */}
       <EditorSection Icon={FileText} title={t('characterProfile.sections.systemPrompt')} defaultExpanded={false}>
-        <div className={styles.fieldContent}>
-          {character.system_prompt || <span className={styles.placeholder}>{t('characterProfile.empty.systemPrompt')}</span>}
-        </div>
+        {character.system_prompt
+          ? <div className={styles.fieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(character.system_prompt) }} />
+          : <div className={styles.fieldContent}><span className={styles.placeholder}>{t('characterProfile.empty.systemPrompt')}</span></div>
+        }
       </EditorSection>
       </div>
     </PanelFadeIn>
@@ -439,18 +449,16 @@ function MemberField({ icon: Icon, label, content }: { icon: any; label: string;
         <Icon size={12} strokeWidth={2} />
         <span>{label}</span>
       </div>
-      <div className={styles.memberFieldContent}>
-        {display}
-        {content.length > MAX_LEN && (
-          <button
-            type="button"
-            className={styles.memberFieldToggle}
-            onClick={() => setShowFull((v) => !v)}
-          >
-            {showFull ? t('characterProfile.showLess') : t('characterProfile.showMore')}
-          </button>
-        )}
-      </div>
+      <div className={styles.memberFieldContent} dangerouslySetInnerHTML={{ __html: renderProfileMarkdown(display) }} />
+      {content.length > MAX_LEN && (
+        <button
+          type="button"
+          className={styles.memberFieldToggle}
+          onClick={() => setShowFull((v) => !v)}
+        >
+          {showFull ? t('characterProfile.showLess') : t('characterProfile.showMore')}
+        </button>
+      )}
     </div>
   )
 }

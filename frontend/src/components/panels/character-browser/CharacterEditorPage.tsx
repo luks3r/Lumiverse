@@ -17,7 +17,7 @@ import { useStore } from '@/store'
 import { useCharacterBrowser } from '@/hooks/useCharacterBrowser'
 import { uuidv7 } from '@/lib/uuid'
 import useImageCropFlow from '@/hooks/useImageCropFlow'
-import { getCharacterAvatarLargeUrl } from '@/lib/avatarUrls'
+import { getCharacterAvatarThumbUrl } from '@/lib/avatarUrls'
 import ImageCropModal from '@/components/shared/ImageCropModal'
 import LazyImage from '@/components/shared/LazyImage'
 import ContextMenu, { type ContextMenuEntry, type ContextMenuPos } from '@/components/shared/ContextMenu'
@@ -109,6 +109,8 @@ export default function CharacterEditorPage() {
 
   const editingCharacterId = useStore((s) => s.editingCharacterId)
   const setEditingCharacterId = useStore((s) => s.setEditingCharacterId)
+  const openDrawer = useStore((s) => s.openDrawer)
+  const setPendingWorldBookEditId = useStore((s) => s.setPendingWorldBookEditId)
   const allCharacters = useStore((s) => s.characters)
   const activeChatId = useStore((s) => s.activeChatId)
   const activeCharacterId = useStore((s) => s.activeCharacterId)
@@ -247,7 +249,7 @@ export default function CharacterEditorPage() {
     const loadWorldBooks = async () => {
       if (!editingCharacterId) return
       try {
-        const res = await worldBooksApi.list({ limit: 200 })
+        const res = await worldBooksApi.list({ limit: 1000 })
         if (!cancelled) setWorldBooks(res.data.map((b) => ({ id: b.id, name: b.name, folder: b.folder || '' })))
       } catch {
         // no-op
@@ -879,7 +881,7 @@ export default function CharacterEditorPage() {
                   >
                     <LazyImage
                       key={avatarKey}
-                      src={getCharacterAvatarLargeUrl(character) ?? ''}
+                      src={getCharacterAvatarThumbUrl(character) ?? ''}
                       alt={character.name}
                       className={styles.avatarImg}
                       fallback={
@@ -1277,7 +1279,20 @@ export default function CharacterEditorPage() {
                               const wb = worldBooks.find((b) => b.id === id)
                               return (
                                 <span key={id} className={styles.charWbPill}>
-                                  <span className={styles.charWbPillName}>{wb?.name || t('characterEditor.unknown')}</span>
+                                  <button
+                                    type="button"
+                                    className={styles.charWbPillName}
+                                    disabled={!wb}
+                                    onClick={() => {
+                                      if (!wb) return
+                                      setPendingWorldBookEditId(wb.id)
+                                      close()
+                                      openDrawer('lorebook')
+                                    }}
+                                    title={wb ? t('characterEditor.openInLorebook') : undefined}
+                                  >
+                                    {wb?.name || t('characterEditor.unknown')}
+                                  </button>
                                   <button
                                     type="button"
                                     className={styles.charWbPillRemove}
@@ -1333,9 +1348,9 @@ export default function CharacterEditorPage() {
                         </div>
                       )}
                       <div className={styles.fieldGroup}>
-                        <span className={styles.fieldLabel}>{t('characterEditor.boundRegex')}</span>
+                        <span className={styles.fieldLabel}>{t('characterEditor.characterRegexScripts')}</span>
                         <span className={styles.fieldHelper}>
-                          {t('characterEditor.boundRegexHelper')}
+                          {t('characterEditor.characterRegexScriptsHelper')}
                         </span>
 
                         {boundRegexScripts.length > 0 && (
@@ -1379,10 +1394,10 @@ export default function CharacterEditorPage() {
                               options={unboundGlobals.map((s) => ({
                                 value: s.id,
                                 label: s.name,
-                                sublabel: s.target,
+                                sublabel: s.target.join(', '),
                               }))}
                               placeholder={t('characterEditor.bindRegexPlaceholder')}
-                              searchPlaceholder={t('characterEditor.searchRegex')}
+                              searchPlaceholder={t('characterEditor.searchRegexScripts')}
                               emptyMessage={t('characterEditor.noUnboundRegex')}
                             />
                           )
@@ -1423,8 +1438,8 @@ export default function CharacterEditorPage() {
     {showDeleteConfirm && (
       <ConfirmationModal
         isOpen={true}
-        title={t('characterEditor.deleteTitle')}
-        message={t('characterEditor.deleteMessage', { name: character?.name || t('characterEditor.thisCharacter') })}
+        title={t('characterEditor.deleteCharacterTitle')}
+        message={t('characterEditor.deleteCharacterMessage', { name: character?.name || t('characterEditor.thisCharacter') })}
         variant="danger"
         confirmText={t('characterEditor.delete')}
         onConfirm={handleDelete}

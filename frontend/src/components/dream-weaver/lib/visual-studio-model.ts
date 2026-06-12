@@ -29,6 +29,7 @@ const LABELS: Record<string, string> = {
   google_gemini: 'Google Gemini',
   a1111: 'AUTOMATIC1111',
   swarmui: 'SwarmUI',
+  openrouter: 'OpenRouter',
 }
 
 export interface VisualStudioAssetSummary {

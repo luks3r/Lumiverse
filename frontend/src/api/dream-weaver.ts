@@ -44,6 +44,7 @@ export type DreamWeaverVisualProvider =
   | 'google_gemini'
   | 'a1111'
   | 'swarmui'
+  | 'openrouter'
 
 export interface DreamWeaverVisualReference {
   id: string
@@ -81,6 +82,8 @@ export type ComfyUIMappedFieldSemantic =
   | 'width'
   | 'height'
   | 'checkpoint'
+  | 'init_image'
+  | 'denoise'
   | 'custom'
 
 export interface ComfyUIFieldMapping {
@@ -374,7 +377,8 @@ function isVisualProvider(value: unknown): value is DreamWeaverVisualProvider {
     value === 'nanogpt' ||
     value === 'google_gemini' ||
     value === 'a1111' ||
-    value === 'swarmui'
+    value === 'swarmui' ||
+    value === 'openrouter'
   )
 }
 

@@ -1,6 +1,8 @@
 import type { SpindleManifest, SpindleFrontendContext, SpindleFrontendModule, PermissionRequestOptions } from 'lumiverse-spindle-types'
 import { createDOMHelper } from './dom-helper'
 import { registerTagInterceptor, unregisterTagInterceptorsByExtension } from './message-interceptors'
+import { registerDisplayResolver, unregisterDisplayResolver } from './display-resolver-registry'
+import { invalidateDisplayRegexCacheForVars, invalidateDisplayRegexCache } from '@/hooks/useDisplayRegex'
 import { removeMessageWidgetsByExtension, upsertMessageWidget, removeMessageWidget } from './message-widgets'
 import {
   createDrawerTabHandle,
@@ -226,11 +228,23 @@ async function doLoadFrontendExtension(
       })
     }
 
-    const dom = createDOMHelper(extensionId, corsProxy)
+    const dom = createDOMHelper(
+      extensionId,
+      corsProxy,
+      () => cachedGrantedPermissions.includes('unsafe_eval'),
+    )
     const uiEvents = createUIEventsHelper(extensionId)
 
-    // Cache granted permissions for synchronous permission checks in ui methods
+    // Cache granted permissions for synchronous permission checks in ui methods.
+    // Kept in sync via the SPINDLE_PERMISSION_CHANGED WS event so admin
+    // grant/revoke takes effect without a full extension reload.
     let cachedGrantedPermissions: string[] = await permissionsPromise
+    const unsubPermissionSync = wsClient.on('SPINDLE_PERMISSION_CHANGED', (payload: any) => {
+      if (payload?.extensionId === extensionId && Array.isArray(payload.allGranted)) {
+        cachedGrantedPermissions = payload.allGranted
+      }
+    })
+    eventUnsubs.push(unsubPermissionSync)
     const mountedPoints = new Set<string>()
     let openModalCount = 0
 
@@ -603,6 +617,32 @@ async function doLoadFrontendExtension(
         removeWidget(messageId: string, widgetId: string) {
           removeMessageWidget(extensionId, messageId, widgetId)
         },
+        getLatestMessageId(): string | null {
+          // Source from the chat store, NOT the DOM. The chat list is
+          // virtualized, so the bubble for the latest message may not
+          // be mounted right now (user scrolled up). Extensions want a
+          // real id regardless of mount state — they can pair this with
+          // dom.findMessageElement / dom.inject and the injection
+          // registry handles auto-replay on remount.
+          const msgs = useStore.getState().messages
+          return msgs.length > 0 ? msgs[msgs.length - 1].id : null
+        },
+        getMessageIdAtIndex(index: number): string | null {
+          const msgs = useStore.getState().messages
+          if (msgs.length === 0) return null
+          // Python-style negative indexing: -1 → last, -2 → second-to-last,
+          // etc. Clamping out-of-range to null keeps the caller from
+          // accidentally walking off either end of the array.
+          const i = index < 0 ? msgs.length + index : index
+          if (i < 0 || i >= msgs.length) return null
+          return msgs[i].id
+        },
+        listMessageIds(): string[] {
+          // Chronological order matches the store's array order — the
+          // chat slice sorts by index_in_chat so callers can rely on
+          // oldest-first / newest-last without re-sorting.
+          return useStore.getState().messages.map((m) => m.id)
+        },
       },
       characters: {
         get(characterId: string) {
@@ -614,6 +654,15 @@ async function doLoadFrontendExtension(
           const updated = await messagesApi.update(chatId, messageId, input)
           useStore.getState().updateMessage(updated.id, updated)
           return updated
+        },
+      },
+      display: {
+        registerResolver(resolver) {
+          return registerDisplayResolver(manifest.identifier, resolver)
+        },
+        invalidate(touchedVars: string[]) {
+          if (touchedVars.includes('*')) invalidateDisplayRegexCache()
+          else invalidateDisplayRegexCacheForVars(new Set(touchedVars))
         },
       },
       manifest,
@@ -747,6 +796,7 @@ export async function unloadFrontendExtension(extensionId: string): Promise<void
   loaded.backendHandlers.clear()
   loaded.processHandlers.clear()
   unregisterTagInterceptorsByExtension(extensionId)
+  unregisterDisplayResolver(loaded.identifier)
   removeMessageWidgetsByExtension(extensionId)
   destroyAllComponentsForExtension(extensionId)
   destroyAllPlacementsForExtension(extensionId)

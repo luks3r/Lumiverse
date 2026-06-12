@@ -320,9 +320,15 @@
 }
 
 @media (max-width: 640px) {
+  .overlay {
+    align-items: stretch;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
   .studio {
     width: calc(100vw / var(--lumiverse-ui-scale, 1));
-    height: calc(100vh / var(--lumiverse-ui-scale, 1));
+    height: calc(var(--app-scaled-viewport-height, calc(100dvh / var(--lumiverse-ui-scale, 1))) - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
     border-radius: 0;
   }
 

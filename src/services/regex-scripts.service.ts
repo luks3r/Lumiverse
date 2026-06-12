@@ -288,10 +288,18 @@ function applyPresetBoundActivationWithDb(
 }
 
 export function rowToRegexScript(row: any): RegexScript {
+  let target: RegexTarget[];
+  try {
+    const parsed = JSON.parse(row.target);
+    target = Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    target = [row.target || "response"];
+  }
   return {
     ...row,
     script_id: row.script_id || "",
     placement: JSON.parse(row.placement),
+    target,
     trim_strings: JSON.parse(row.trim_strings),
     folder: row.folder || "",
     pack_id: row.pack_id || null,
@@ -375,8 +383,16 @@ function validateInput(input: CreateRegexScriptInput | UpdateRegexScriptInput, i
       return "scope_id is required for non-global scope";
     }
   }
-  if (input.target !== undefined && !VALID_TARGETS.has(input.target)) {
-    return `Invalid target: ${input.target}`;
+  if (input.target !== undefined) {
+    if (typeof input.target === "string") {
+      (input as any).target = [input.target];
+    }
+    if (!Array.isArray(input.target) || input.target.length === 0) {
+      return "target must be a non-empty array";
+    }
+    for (const t of input.target) {
+      if (!VALID_TARGETS.has(t)) return `Invalid target: ${t}`;
+    }
   }
   if (input.substitute_macros !== undefined && !VALID_MACRO_MODES.has(input.substitute_macros)) {
     return `Invalid substitute_macros: ${input.substitute_macros}`;
@@ -421,7 +437,7 @@ export function listRegexScripts(
     params.push(filters.scope_id);
   }
   if (filters?.target) {
-    conditions.push("target = ?");
+    conditions.push(`instr(target, '"' || ? || '"') > 0`);
     params.push(filters.target);
   }
   if (filters?.character_id) {
@@ -445,9 +461,14 @@ export function listRegexScripts(
 
 // Prepared statement for hot-path regex fetch
 let _stmtRegexById: ReturnType<ReturnType<typeof getDb>["query"]> | null = null;
+let _stmtRegexByIdGen = -1;
 
 export function getRegexScript(userId: string, id: string): RegexScript | null {
-  if (!_stmtRegexById) _stmtRegexById = getDb().query("SELECT * FROM regex_scripts WHERE id = ? AND user_id = ?");
+  const gen = require("../db/connection").getDbGeneration() as number;
+  if (!_stmtRegexById || _stmtRegexByIdGen !== gen) {
+    _stmtRegexById = getDb().query("SELECT * FROM regex_scripts WHERE id = ? AND user_id = ?");
+    _stmtRegexByIdGen = gen;
+  }
   const row = _stmtRegexById.get(id, userId) as any;
   return row ? rowToRegexScript(row) : null;
 }
@@ -484,7 +505,7 @@ export function createRegexScript(
       JSON.stringify(input.placement ?? ["ai_output"]),
       input.scope ?? "global",
       input.scope === "global" || !input.scope ? null : (input.scope_id ?? null),
-      input.target ?? "response",
+      JSON.stringify(input.target ?? ["response"]),
       input.min_depth ?? null,
       input.max_depth ?? null,
       JSON.stringify(input.trim_strings ?? []),
@@ -566,7 +587,7 @@ export function updateRegexScript(
   if (nextInput.placement !== undefined) { fields.push("placement = ?"); values.push(JSON.stringify(nextInput.placement)); }
   if (nextInput.scope !== undefined) { fields.push("scope = ?"); values.push(nextInput.scope); }
   if (nextInput.scope_id !== undefined) { fields.push("scope_id = ?"); values.push(nextInput.scope_id); }
-  if (nextInput.target !== undefined) { fields.push("target = ?"); values.push(nextInput.target); }
+  if (nextInput.target !== undefined) { fields.push("target = ?"); values.push(JSON.stringify(nextInput.target)); }
   if (nextInput.min_depth !== undefined) { fields.push("min_depth = ?"); values.push(nextInput.min_depth); }
   if (nextInput.max_depth !== undefined) { fields.push("max_depth = ?"); values.push(nextInput.max_depth); }
   if (nextInput.trim_strings !== undefined) { fields.push("trim_strings = ?"); values.push(JSON.stringify(nextInput.trim_strings)); }
@@ -674,7 +695,7 @@ export function duplicateRegexScript(userId: string, id: string): RegexScript | 
       JSON.stringify(existing.placement),
       existing.scope,
       existing.scope_id,
-      existing.target,
+      JSON.stringify(existing.target),
       existing.min_depth,
       existing.max_depth,
       JSON.stringify(existing.trim_strings),
@@ -765,15 +786,59 @@ export function getActiveScripts(
 ): RegexScript[] {
   const db = getDb();
 
-  // Build a query that fetches all candidate scripts and orders by scope tier, then sort_order
+  // target is stored as a JSON array (e.g. '["prompt","display"]'). Match scripts
+  // whose array contains the requested target using instr on the serialized form.
   const conditions = [
     "user_id = ?",
     "disabled = 0",
-    "target = ?",
+    `instr(target, '"' || ? || '"') > 0`,
   ];
   const params: any[] = [userId, opts.target];
 
   // Scope filter: include global + character-scoped + chat-scoped matching the current context
+  const scopeConditions: string[] = ["scope = 'global'"];
+  if (opts.characterId) {
+    scopeConditions.push("(scope = 'character' AND scope_id = ?)");
+    params.push(opts.characterId);
+  }
+  if (opts.chatId) {
+    scopeConditions.push("(scope = 'chat' AND scope_id = ?)");
+    params.push(opts.chatId);
+  }
+  conditions.push(`(${scopeConditions.join(" OR ")})`);
+
+  const where = conditions.join(" AND ");
+
+  const rows = db
+    .query(
+      `SELECT * FROM regex_scripts WHERE ${where}
+       ORDER BY
+         CASE scope WHEN 'global' THEN 0 WHEN 'character' THEN 1 WHEN 'chat' THEN 2 END ASC,
+         sort_order ASC, created_at ASC`
+    )
+    .all(...params) as any[];
+
+  return rows.map(rowToRegexScript);
+}
+
+/**
+ * Get scripts that target "response" and have run_on_edit enabled —
+ * used when a message is edited to apply regex transformations.
+ */
+export function getRunOnEditScripts(
+  userId: string,
+  opts: { characterId?: string; chatId?: string }
+): RegexScript[] {
+  const db = getDb();
+
+  const conditions = [
+    "user_id = ?",
+    "disabled = 0",
+    "run_on_edit = 1",
+    `instr(target, '"response"') > 0`,
+  ];
+  const params: any[] = [userId];
+
   const scopeConditions: string[] = ["scope = 'global'"];
   if (opts.characterId) {
     scopeConditions.push("(scope = 'character' AND scope_id = ?)");
@@ -1062,6 +1127,7 @@ export async function applyRegexScripts(
         });
       }
     } catch (e) {
+      if (options?.outFingerprint) options.outFingerprint.cacheable = false;
       if (e instanceof RegexTimeoutError) {
         const elapsedMs = Date.now() - startedAt;
         const flagged = reportRegexScriptPerformance(script.user_id, script.id, {
@@ -1336,10 +1402,12 @@ function convertStPlacement(placement: any[]): RegexPlacement[] {
   return [...new Set(result)];
 }
 
-function convertStTarget(item: any): RegexTarget {
-  if (item.markdownOnly) return "display";
-  if (item.promptOnly) return "prompt";
-  return "response";
+function convertStTarget(item: any): RegexTarget[] {
+  const targets: RegexTarget[] = [];
+  if (item.markdownOnly) targets.push("display");
+  if (item.promptOnly) targets.push("prompt");
+  if (targets.length === 0) targets.push("response");
+  return targets;
 }
 
 export function importRegexScripts(

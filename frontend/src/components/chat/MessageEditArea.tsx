@@ -1,5 +1,5 @@
 import { Brain } from 'lucide-react'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useLayoutEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import styles from './MessageEditArea.module.css'
 
@@ -28,8 +28,10 @@ export default function MessageEditArea({
   const contentRef = useRef<HTMLTextAreaElement>(null)
   const reasoningRef = useRef<HTMLTextAreaElement>(null)
 
-  useEffect(() => { autoResize(contentRef.current) }, [editContent])
-  useEffect(() => { autoResize(reasoningRef.current) }, [editReasoning])
+  // Fit to initial content on mount, and re-fit when the value changes externally.
+  // useLayoutEffect prevents a paint frame at the wrong height.
+  useLayoutEffect(() => { autoResize(contentRef.current) }, [editContent])
+  useLayoutEffect(() => { autoResize(reasoningRef.current) }, [editReasoning])
 
   const handleContentChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     onChangeContent(e.target.value)

@@ -1,4 +1,4 @@
-import type { Message, Character, Persona, Preset, ConnectionProfile, ProviderInfo, RecentChat, Pack, PackWithItems, LumiaItem, LoomItem, ImageGenConnectionProfile, ImageGenProviderInfo } from './api'
+import type { Message, Character, Persona, Preset, ConnectionProfile, ProviderInfo, RecentChat, GroupedRecentChat, PaginatedResult, Pack, PackWithItems, LumiaItem, LoomItem, ImageGenConnectionProfile, ImageGenProviderInfo } from './api'
 
 // ---- Chat Slice ----
 export interface ChatSlice {
@@ -14,6 +14,9 @@ export interface ChatSlice {
    * write).
    */
   activeChatMetadata: Record<string, any> | null
+  activeChatDisplayOwner: string | null
+  /** The chat row's `name` for the currently-open chat (group chats display it as the group name) */
+  activeChatName: string | null
   messages: Message[]
   isStreaming: boolean
   streamingContent: string
@@ -23,17 +26,33 @@ export interface ChatSlice {
   streamingError: string | null
   activeGenerationId: string | null
   regeneratingMessageId: string | null
+  /** Index of the swipe the active generation streams into. Lets the UI gate the
+   *  streaming buffer to that swipe so the user can navigate to other swipes
+   *  mid-generation. null when unknown (pre-GENERATION_STARTED) or idle. */
+  streamingSwipeId: number | null
   streamingGenerationType: string | null
   /** The generation type of the last completed generation — survives endStreaming() */
   lastCompletedGenerationType: string | null
-  lastPooledSeq: number | null
+  /** messageId → index of a freshly-generated swipe the user hasn't navigated to
+   *  yet (they stayed on an older swipe while it generated). Drives the
+   *  "new swipe ready" badge; cleared once they land on that swipe. */
+  unseenSwipes: Record<string, number>
   totalChatLength: number
   /** Content from an impersonate-draft generation, ready to populate the input box */
   impersonateDraftContent: string | null
+  /**
+   * First recent-chats page delivered by GET /bootstrap so the landing page
+   * can render without its own fetch. Consume-once: the landing page clears
+   * it when applied, so later mounts and WS-driven refreshes always refetch.
+   */
+  landingRecentChats: PaginatedResult<GroupedRecentChat> | null
+  setLandingRecentChats: (result: PaginatedResult<GroupedRecentChat> | null) => void
   setActiveChat: (chatId: string | null, characterId?: string | null) => void
   setActiveChatWallpaper: (wallpaper: WallpaperRef | null) => void
   setActiveChatAvatarId: (imageId: string | null) => void
   setActiveChatMetadata: (metadata: Record<string, any> | null) => void
+  setActiveChatDisplayOwner: (owner: string | null) => void
+  setActiveChatName: (name: string | null) => void
   setMessages: (messages: Message[], total?: number) => void
   prependMessages: (messages: Message[]) => void
   addMessage: (message: Message) => void
@@ -41,12 +60,26 @@ export interface ChatSlice {
   removeMessage: (id: string) => void
   beginStreaming: (regeneratingMessageId?: string, generationType?: string) => void
   startStreaming: (generationId: string, regeneratingMessageId?: string, generationType?: string) => void
-  appendStreamToken: (token: string) => void
-  appendStreamReasoning: (token: string) => void
-  replaceStreamContent: (content: string) => void
-  replaceStreamReasoning: (reasoning: string) => void
+  /** Append a live stream segment. When `offset` (char position of the segment
+   *  start in the server's cumulative buffer) is provided, overlap with already-
+   *  rendered content is sliced off exactly; returns 'gap' when the segment
+   *  starts beyond the local buffer (missed tokens — caller should re-poll the
+   *  pool), 'stale' when fully covered, 'appended' otherwise. */
+  appendStreamToken: (token: string, offset?: number) => 'appended' | 'stale' | 'gap'
+  appendStreamReasoning: (token: string, offset?: number) => 'appended' | 'stale' | 'gap'
+  /** Apply a pool snapshot (offset 0) or delta (offset = where `content` begins).
+   *  Monotonic: never rewinds the local buffer (snapshots race live WS tokens). */
+  reconcileStreamContent: (content: string, offset: number) => void
+  reconcileStreamReasoning: (reasoning: string, offset: number) => void
+  /** Current raw (unflushed) streaming buffers — used to request pool deltas. */
+  getStreamBuffers: () => { content: string; reasoning: string }
   setStreamingReasoningStartedAt: (ts: number | null) => void
-  setLastPooledSeq: (seq: number) => void
+  /** Set the swipe index the active generation streams into (null when unknown). */
+  setStreamingSwipeId: (swipeId: number | null) => void
+  /** Flag a freshly-generated swipe as unseen (drives the "new swipe ready" badge). */
+  setUnseenSwipe: (messageId: string, swipeId: number) => void
+  /** Clear the unseen-swipe flag for a message (e.g. once the user views it). */
+  clearUnseenSwipe: (messageId: string) => void
   endStreaming: () => void
   stopStreaming: () => void
   setStreamingError: (error: string | null) => void
@@ -81,6 +114,8 @@ export interface StartupSettings {
   viewMode?: CharacterViewMode
   charactersPerPage?: number
   theme?: ThemeConfig | null
+  landingPageChatsDisplayed?: number
+  landingPageLayoutMode?: 'cards' | 'compact'
 }
 
 export interface CharactersSlice {
@@ -346,6 +381,7 @@ export interface WallpaperSettings {
   global: WallpaperRef | null
   opacity: number
   fit: 'cover' | 'contain' | 'fill'
+  blur: number
 }
 
 // ---- Custom CSS ----
@@ -401,6 +437,9 @@ export interface SettingsSlice {
   bubbleUserAlign: 'left' | 'right'
   bubbleDisableHover: boolean
   bubbleHideAvatarBg: boolean
+  bubbleUseFullAvatar: boolean
+  /** Bubble background opacity, 0–1. 1 = the theme's natural bubble fill (default). */
+  bubbleOpacity: number
   chatSheldEnterToSend: boolean
   saveDraftInput: boolean
   chatWidthMode: 'full' | 'comfortable' | 'compact' | 'custom'
@@ -434,6 +473,7 @@ export interface SettingsSlice {
   guidedGenerations: GuidedGeneration[]
   quickReplySets: QuickReplySet[]
   wallpaper: WallpaperSettings
+  useCharacterBackground: boolean
   thumbnailSettings: { smallSize: number, largeSize: number }
   pushNotificationPreferences: { enabled: boolean, events: { generation_ended: boolean, generation_error: boolean } }
   chatHeadsEnabled: boolean
@@ -470,6 +510,7 @@ export interface SettingsSlice {
   renameSavedTheme: (id: string, name: string) => void
   deleteSavedTheme: (id: string) => Promise<void>
   applySavedTheme: (id: string) => void
+  updateSavedTheme: (id: string) => void
   loadSettings: () => Promise<void>
 }
 
@@ -482,7 +523,7 @@ export interface DrawerSettings {
   side: 'left' | 'right'
   verticalPosition: number
   tabSize: 'large' | 'compact'
-  panelWidthMode: 'default' | 'stChat' | 'custom'
+  panelWidthMode: 'default' | 'custom'
   customPanelWidth: number
   showTabLabels: boolean
   hiddenTabIds: string[]
@@ -667,6 +708,8 @@ export interface ImageGenSettings {
   promptGenerationTimeoutSeconds?: number
   /** Maximum seconds for the image provider generation phase. 0 disables the timeout. */
   generationTimeoutSeconds?: number
+  /** Maximum recent chat messages sent to the prompt parser for scene analysis and parsed custom prompts. */
+  promptContextMessageLimit?: number
   sceneChangeThreshold: number
   autoGenerate: boolean
   forceGeneration: boolean
@@ -683,7 +726,7 @@ export interface ImageGenSettings {
   novelai?: Record<string, any>
 }
 
-export type ImageGenPresetKind = 'main' | 'character' | 'persona'
+export type ImageGenPresetKind = 'main' | 'character' | 'persona' | 'captioning'
 
 export interface ImageGenPromptPreset {
   id: string
@@ -819,6 +862,9 @@ export interface SpindleSlice {
   extensionThemeOverrides: Record<string, ExtensionThemeOverride>
   /** Extension IDs whose theme overrides are suppressed by the user */
   mutedExtensionThemes: Record<string, boolean>
+  /** Per-chat extension claims for CSS containment mode, keyed chatId then
+   *  extensionId. A chat is effectively relaxed iff any extension claims it. */
+  chatStyleModes: Record<string, Record<string, 'extension-relaxed'>>
   /** Real-time operation status from backend WS events */
   extensionOperationStatus: ExtensionOperationStatus | null
   /** In-flight bulk update progress (null when idle). */
@@ -856,6 +902,9 @@ export interface SpindleSlice {
   setExtensionThemeOverride: (override: ExtensionThemeOverride) => void
   clearExtensionThemeOverride: (extensionId: string) => void
   clearAllExtensionThemeOverrides: () => void
+  setChatStyleMode: (chatId: string, extensionId: string, mode: 'bounded' | 'extension-relaxed') => void
+  clearChatStyleMode: (chatId: string) => void
+  clearExtensionChatStyleModes: (extensionId: string) => void
   muteExtensionTheme: (extensionId: string) => void
   unmuteExtensionTheme: (extensionId: string) => void
   setExtensionOperationStatus: (extensionId: string | null, operation: string, name: string | null) => void
@@ -866,13 +915,19 @@ export interface SpindleSlice {
 // ---- Summary Slice ----
 import type { SummarizationSettings } from '@/lib/summary/types'
 
+export type SummaryOperation = 'generating' | 'rebuilding' | null
+
 export interface SummarySlice {
   summarization: SummarizationSettings
   isSummarizing: boolean
   lastSummaryMutation: { chatId: string; summaryText: string } | null
+  rebuildProgress: { batchNumber: number; totalBatches: number } | null
+  activeSummaryOperation: SummaryOperation
   setSummarization: (settings: Partial<SummarizationSettings>) => void
   setIsSummarizing: (value: boolean) => void
   setLastSummaryMutation: (value: { chatId: string; summaryText: string } | null) => void
+  setRebuildProgress: (value: { batchNumber: number; totalBatches: number } | null) => void
+  setActiveSummaryOperation: (value: SummaryOperation) => void
 }
 
 // ---- Auth Slice ----
@@ -921,6 +976,9 @@ export interface WorldInfoSlice {
   worldInfoStats: WorldInfoStats | null
   setActivatedWorldInfo: (entries: ActivatedWorldInfoEntry[], stats?: WorldInfoStats | null) => void
   clearActivatedWorldInfo: () => void
+  /** Book id the Lorebook tab should select on next mount/visit (cross-component navigation). */
+  pendingWorldBookEditId: string | null
+  setPendingWorldBookEditId: (id: string | null) => void
 }
 
 // Lumi Feedback Slice

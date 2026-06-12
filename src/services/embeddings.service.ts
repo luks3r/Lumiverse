@@ -20,7 +20,8 @@ import {
 import { getProvider } from "../llm/registry";
 import { getFirstUserId } from "../auth/seed";
 import { sanitizeForVectorization } from "../utils/content-sanitizer";
-import { describeProviderError } from "../utils/provider-errors";
+import { describeProviderError, readBoundedText } from "../utils/provider-errors";
+import { fetchWithPreflightAbort, readJsonWithAbort } from "../llm/stream-utils";
 import { resolveBrokenTermuxLanceDbMirrorPath, resolveLanceDbConnectUri } from "../utils/lancedb-path";
 import { chunkDocument } from "./databank/document-chunker.service";
 import { loadWorldBookVectorSettings, type WorldBookVectorSettings } from "./world-book-vector-settings.service";
@@ -589,6 +590,43 @@ async function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
     const next = _writeLockQueue.shift();
     if (next) next.resolve();
     else _writeLockHeld = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Read tracking — lets compaction wait for in-flight native reads to finish.
+// LanceDB memory-maps its data/manifest files; optimize() with cleanupOlderThan
+// DELETES superseded version files. If a native read still holds an mmap over a
+// file being deleted, the fault is uncatchable (SIGBUS/SIGSEGV) — the same class
+// as the SQLite mmap crash. CLEANUP_GRACE_PERIOD_MS already shields freshly-
+// superseded versions for new reads; this drain closes the remaining window by
+// making optimize wait until no tracked read is in flight before it deletes.
+// All cancellable native reads flow through raceWithSignal(), which is where the
+// begin/end bookkeeping is attached — route any new native read through it too.
+// ---------------------------------------------------------------------------
+let _activeReadCount = 0;
+
+function beginRead(): () => void {
+  _activeReadCount++;
+  let ended = false;
+  return () => {
+    if (ended) return;
+    ended = true;
+    _activeReadCount = Math.max(0, _activeReadCount - 1);
+  };
+}
+
+async function waitForReadsToDrain(timeoutMs = 30_000): Promise<void> {
+  if (_activeReadCount === 0) return;
+  const startedAt = Date.now();
+  while (_activeReadCount > 0) {
+    if (Date.now() - startedAt >= timeoutMs) {
+      console.warn(
+        `[embeddings] Compaction proceeding with ${_activeReadCount} read(s) still in flight (drain wait timed out after ${timeoutMs}ms)`,
+      );
+      return;
+    }
+    await sleep(25);
   }
 }
 
@@ -1600,6 +1638,7 @@ export async function runStartupVectorMaintenance(): Promise<void> {
 
       try {
         console.info(`[embeddings] Running startup compaction for ${tableName}...`);
+        await waitForReadsToDrain();
         await table.optimize({ cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS) });
       } catch (err) {
         console.warn(`[embeddings] Startup compaction failed for ${tableName}:`, err);
@@ -1643,6 +1682,9 @@ export async function optimizeTable(tableNames?: string[]): Promise<void> {
         const table = await getTableIfExists(tableName, true);
         if (!table) continue;
 
+        // Wait for in-flight native reads to drain so compaction doesn't unlink
+        // version files a live read has memory-mapped (uncatchable SIGBUS).
+        await waitForReadsToDrain();
         await table.optimize({
           cleanupOlderThan: new Date(Date.now() - CLEANUP_GRACE_PERIOD_MS),
         });
@@ -2305,31 +2347,39 @@ async function requestVertexEmbeddings(
 
 async function postVertex<T>(url: string, accessToken: string, body: Record<string, any>, timeoutMs: number, externalSignal?: AbortSignal): Promise<T> {
   const { signal, cleanup } = linkTimeoutSignal(externalSignal, timeoutMs);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err: any) {
+  const mapAbortError = (err: any): Error => {
     if (err?.name === "AbortError") {
-      if (externalSignal?.aborted) throw err;
-      throw new Error(`Vertex embedding request timed out after ${timeoutMs / 1000}s`);
+      if (externalSignal?.aborted) return err;
+      return new Error(`Vertex embedding request timed out after ${timeoutMs / 1000}s`);
     }
-    throw err;
+    return err;
+  };
+  try {
+    let res: Response;
+    try {
+      res = await fetchWithPreflightAbort(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(body),
+      }, signal);
+    } catch (err: any) {
+      throw mapAbortError(err);
+    }
+    if (!res.ok) {
+      const msg = (await readBoundedText(res)) || "Vertex embedding request failed";
+      throw new Error(`Vertex embedding request failed (${res.status}): ${msg}`);
+    }
+    try {
+      return await readJsonWithAbort<T>(res, signal);
+    } catch (err: any) {
+      throw mapAbortError(err);
+    }
   } finally {
     cleanup();
   }
-  if (!res.ok) {
-    const msg = await res.text().catch(() => "Vertex embedding request failed");
-    throw new Error(`Vertex embedding request failed (${res.status}): ${msg}`);
-  }
-  return (await res.json()) as T;
 }
 
 async function requestEmbeddings(
@@ -2384,36 +2434,44 @@ async function requestEmbeddings(
     ? cfg.request_timeout * 1000
     : DEFAULT_EMBEDDING_REQUEST_TIMEOUT_MS;
   const { signal, cleanup } = linkTimeoutSignal(options?.signal, timeoutMs);
-  let res: Response;
-  try {
-    res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err: any) {
+  const mapAbortError = (err: any): Error => {
     if (err?.name === "AbortError") {
       // Distinguish external cancel (caller-initiated) from our own timeout.
-      if (options?.signal?.aborted) throw err;
-      throw new Error(`Embedding request timed out after ${timeoutMs / 1000}s`);
+      if (options?.signal?.aborted) return err;
+      return new Error(`Embedding request timed out after ${timeoutMs / 1000}s`);
     }
-    throw err;
+    return err;
+  };
+  try {
+    let res: Response;
+    try {
+      res = await fetchWithPreflightAbort(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(body),
+      }, signal);
+    } catch (err: any) {
+      throw mapAbortError(err);
+    }
+
+    if (!res.ok) {
+      const msg = (await readBoundedText(res)) || "Embedding request failed";
+      throw new Error(`Embedding request failed (${res.status}): ${msg}`);
+    }
+
+    let payload: any;
+    try {
+      payload = await readJsonWithAbort<any>(res, signal);
+    } catch (err: any) {
+      throw mapAbortError(err);
+    }
+    return parseEmbeddingResponse(payload, texts.length);
   } finally {
     cleanup();
   }
-
-  if (!res.ok) {
-    const msg = await res.text().catch(() => "Embedding request failed");
-    throw new Error(`Embedding request failed (${res.status}): ${msg}`);
-  }
-
-  const payload = await res.json() as any;
-  const vectors = parseEmbeddingResponse(payload, texts.length);
-  return vectors;
 }
 
 export async function embedTexts(
@@ -2526,6 +2584,52 @@ function isRetryableBatchError(err: Error): boolean {
 
 function looksLikePhysicalBatchLimit(err: Error): boolean {
   return /too large to process|physical batch size|exceeds.*context/i.test(err.message);
+}
+
+/**
+ * Next (shorter) length to retry an over-budget query embed at, or null when
+ * we've hit the floor and should give up. Halving mirrors
+ * embedWithAdaptiveBatching's backoff; the floor stops us from spinning on a
+ * backend that rejects everything.
+ */
+export function nextQueryEmbedLength(currentLen: number, minChars: number): number | null {
+  if (currentLen <= minChars) return null;
+  const next = Math.max(minChars, Math.floor(currentLen / 2));
+  return next < currentLen ? next : null;
+}
+
+/**
+ * Embed a single retrieval query, shrinking it on retryable "input too large"
+ * errors instead of letting the caller collapse to a recency fallback.
+ * Token-limited embedding backends (llama.cpp `n_ubatch`, 512-token BERT
+ * models) reject oversized inputs with 413/500 — and a multi-message LTCM
+ * query easily exceeds that. We keep the most-recent tail (consistent with how
+ * the query is built) and halve until the backend accepts it or we hit the
+ * floor, at which point the original error propagates.
+ */
+export async function embedQueryAdaptive(
+  userId: string,
+  text: string,
+  options?: { signal?: AbortSignal; minChars?: number },
+): Promise<number[]> {
+  const minChars = Math.max(64, options?.minChars ?? 512);
+  let current = text;
+  for (;;) {
+    try {
+      const [vec] = await cachedEmbedTexts(userId, [current], { signal: options?.signal });
+      return vec ?? [];
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      // Never swallow a genuine cancellation by retrying a smaller input.
+      if (options?.signal?.aborted || /abort/i.test(e.message)) throw e;
+      const nextLen = isRetryableBatchError(e) ? nextQueryEmbedLength(current.length, minChars) : null;
+      if (nextLen == null) throw e;
+      console.warn(
+        `[embeddings] Query embed of ${current.length} chars failed (${e.message}); retrying truncated to ${nextLen} chars`,
+      );
+      current = current.slice(-nextLen);
+    }
+  }
 }
 
 /**
@@ -2676,8 +2780,18 @@ function attachJoiner(
 }
 
 /** Race a shared promise against an abort signal so the caller's await can
- *  reject on cancel without killing the shared upstream request. */
+ *  reject on cancel without killing the shared upstream request.
+ *
+ *  Also the single chokepoint for read tracking (see beginRead/waitForReadsToDrain):
+ *  the end-read is tied to the UNDERLYING native promise, never to this race
+ *  wrapper. On abort the wrapper rejects early, but the native toArray() keeps
+ *  running — and keeps its mmap over the version files — until it actually
+ *  settles. Decrementing the read count before then would reopen the very
+ *  unlink-during-mmap window the drain exists to close. */
 function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  const endRead = beginRead();
+  promise.then(endRead, endRead);
+
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException("Aborted", "AbortError"));
   return new Promise<T>((resolve, reject) => {
@@ -3420,6 +3534,47 @@ export async function deleteChatChunkEmbeddings(
   scheduleOptimize("chat_chunk");
 }
 
+/**
+ * Delete chat-chunk vectors whose source_id is no longer a live chunk.
+ * Chunk rebuilds mint fresh chunk UUIDs and clear the chat's vectors up
+ * front, but the vectorization queue writes asynchronously — a batch that
+ * was mid-flight during a rebuild can land its vectors *after* that delete,
+ * leaving orphans keyed to chunk UUIDs that no longer exist. Those orphans
+ * carry the same content as the rebuilt chunks, so retrieval surfaces them
+ * as duplicate memory-injection entries. This reconciles LanceDB against the
+ * authoritative chat_chunks set and removes the strays.
+ *
+ * `validChunkIds` MUST be the current chat_chunks ids. An empty set is
+ * treated as "unknown" and skipped so we never wipe a chat that is mid-
+ * rebuild (between its DELETE and its re-insert).
+ */
+export async function reconcileChatChunkEmbeddings(
+  userId: string,
+  chatId: string,
+  validChunkIds: Iterable<string>,
+): Promise<number> {
+  const valid = new Set(validChunkIds);
+  if (valid.size === 0) return 0;
+
+  const table = await getTableIfExists(EMBEDDINGS_TABLE, true);
+  if (!table) return 0;
+
+  const rows = await table
+    .query()
+    .where(`user_id = ${sqlValue(userId)} AND source_type = 'chat_chunk' AND owner_id = ${sqlValue(chatId)}`)
+    .select(["source_id"])
+    .toArray();
+
+  const orphanIds = Array.from(
+    new Set((rows as any[]).map((r) => String(r.source_id)).filter((id) => !valid.has(id))),
+  );
+  if (orphanIds.length === 0) return 0;
+
+  await deleteChatChunkEmbeddings(userId, chatId, orphanIds);
+  console.info(`[embeddings] Reconciled chat ${chatId.split("-")[0]}…: removed ${orphanIds.length} orphaned chunk vector(s)`);
+  return orphanIds.length;
+}
+
 export async function syncChatChunkEmbedding(
   userId: string,
   chatId: string,
@@ -3545,9 +3700,9 @@ export async function reindexChatMessages(
     }
   }
 
-  // Delete orphaned chunks
-  for (const id of chunksToDelete) {
-    await deleteChatChunkEmbeddings(userId, chatId, id);
+  // Delete orphaned chunks in a single call (the helper accepts a string[]).
+  if (chunksToDelete.length > 0) {
+    await deleteChatChunkEmbeddings(userId, chatId, chunksToDelete);
   }
 
   const batchSize = Math.max(1, Math.min(cfg.batch_size, 200));
@@ -3597,7 +3752,7 @@ export async function searchChatChunks(
   allowedChunkIds?: Set<string>,
   signal?: AbortSignal,
   options?: { skipVectorFetch?: boolean },
-): Promise<Array<{ chunk_id: string; score: number; content: string; metadata: any }>> {
+): Promise<Array<{ chunk_id: string; score: number | null; content: string; metadata: any }>> {
   if (signal?.aborted) return [];
   const table = await getTableIfExists(EMBEDDINGS_TABLE);
   if (!table) return [];
@@ -3700,7 +3855,7 @@ export async function searchChatChunks(
   }
 
   // Parse rows and collect metadata
-  type ParsedRow = { chunkId: string; score: number; content: string; metadata: any; rowVector: number[] | null };
+  type ParsedRow = { chunkId: string; score: number | null; content: string; metadata: any; rowVector: number[] | null };
   const parsed: Array<{ chunkId: string; meta: any; row: any }> = [];
   const needMessageIdLookup: string[] = [];
 
@@ -3760,7 +3915,11 @@ export async function searchChatChunks(
 
     candidates.push({
       chunkId,
-      score: typeof row._distance === "number" ? row._distance : 0,
+      // FTS-only (keyword) hits carry no vector `_distance`. Use null, not 0:
+      // in cosine-distance space 0 means "identical", so a 0 here would make a
+      // keyword hit masquerade as a perfect match and sail past the
+      // similarity-distance filter downstream.
+      score: typeof row._distance === "number" ? row._distance : null,
       content: clipOversizedChunkContent(String(row.content || ""), chunkId),
       metadata: meta,
       rowVector,
@@ -3892,7 +4051,7 @@ function clipOversizedChunkContent(content: string, chunkId: string): string {
  *   0.7 is a good default for chat memory.
  */
 function mmrSelect(
-  candidates: Array<{ chunkId: string; score: number; content: string; metadata: any; rowVector: number[] | null }>,
+  candidates: Array<{ chunkId: string; score: number | null; content: string; metadata: any; rowVector: number[] | null }>,
   queryVector: number[],
   k: number,
   lambda = 0.7,
@@ -3912,8 +4071,10 @@ function mmrSelect(
 
     for (const idx of remaining) {
       const candidate = withVectors[idx];
-      // Relevance: higher similarity to query = better (invert cosine distance)
-      const relevance = 1 - candidate.score;
+      // Relevance: higher similarity to query = better (invert cosine
+      // distance). A keyword-only hit (score === null) has no vector distance,
+      // so it contributes no relevance and is selected on diversity alone.
+      const relevance = candidate.score == null ? 0 : 1 - candidate.score;
 
       // Diversity: max similarity to any already-selected chunk
       let maxSimToSelected = 0;
