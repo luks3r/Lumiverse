@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { fetchWithPreflightAbort } from "./stream-utils";
+import { cleanupStreamReader, fetchWithPreflightAbort } from "./stream-utils";
 
 describe("fetchWithPreflightAbort", () => {
   test("aborts the provider request before response headers arrive", async () => {
@@ -57,5 +57,47 @@ describe("fetchWithPreflightAbort", () => {
     } finally {
       globalThis.fetch = originalFetch;
     }
+  });
+});
+
+describe("cleanupStreamReader", () => {
+  test("releases instead of canceling after an abort", () => {
+    const controller = new AbortController();
+    let canceled = false;
+    let released = false;
+    const reader = {
+      cancel() {
+        canceled = true;
+        return Promise.resolve();
+      },
+      releaseLock() {
+        released = true;
+      },
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+
+    controller.abort(new DOMException("Stopped", "AbortError"));
+    cleanupStreamReader(reader, controller.signal);
+
+    expect(canceled).toBe(false);
+    expect(released).toBe(true);
+  });
+
+  test("cancels active readers on non-abort cleanup", () => {
+    let canceled = false;
+    let released = false;
+    const reader = {
+      cancel() {
+        canceled = true;
+        return Promise.resolve();
+      },
+      releaseLock() {
+        released = true;
+      },
+    } as unknown as ReadableStreamDefaultReader<Uint8Array>;
+
+    cleanupStreamReader(reader, undefined);
+
+    expect(canceled).toBe(true);
+    expect(released).toBe(false);
   });
 });

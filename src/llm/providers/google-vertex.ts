@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 import { fetchProviderJson, throwProviderResponseError } from "../../utils/provider-errors";
 import { sanitizeGeminiSchema } from "./google";
@@ -402,7 +402,7 @@ export class GoogleVertexProvider implements LlmProvider {
         }
       }
     } finally {
-      reader.cancel().catch(() => {});
+      cleanupStreamReader(reader, request.signal);
     }
   }
 

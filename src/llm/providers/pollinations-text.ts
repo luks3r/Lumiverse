@@ -1,6 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 
 export class PollinationsTextProvider extends OpenAICompatibleProvider {
   readonly name = "pollinations_text";
@@ -143,7 +143,7 @@ export class PollinationsTextProvider extends OpenAICompatibleProvider {
         }
       }
     } finally {
-      reader.cancel().catch(() => {});
+      cleanupStreamReader(reader, request.signal);
     }
   }
 }

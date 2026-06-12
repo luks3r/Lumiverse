@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 import {
   getTextContent,
   type GenerationUsage,
@@ -371,7 +371,7 @@ export class AnthropicProvider implements LlmProvider {
         }
       }
     } finally {
-      reader.cancel().catch(() => {});
+      cleanupStreamReader(reader, request.signal);
     }
   }
 

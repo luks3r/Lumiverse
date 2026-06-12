@@ -57,6 +57,26 @@ export async function readWithAbort<T>(
   });
 }
 
+export function cleanupStreamReader<T>(
+  reader: ReadableStreamDefaultReader<T>,
+  signal: AbortSignal | undefined,
+): void {
+  // readWithAbort() intentionally resolves immediately when the user aborts,
+  // leaving the underlying native reader.read() to settle later. Calling
+  // reader.cancel() during that pending read has triggered Bun process crashes
+  // in the streaming generation path, so aborted streams are released only.
+  if (signal?.aborted) {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  reader.cancel().catch(() => {});
+}
+
 // Streaming providers can emit a large number of tiny reasoning/text deltas in a
 // tight loop. Periodically yielding a macrotask keeps Bun's HTTP/WS queue moving
 // so stop requests and health checks do not starve behind an active stream.

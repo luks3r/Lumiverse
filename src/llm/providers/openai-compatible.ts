@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import type { ProviderCapabilities } from "../param-schema";
-import { createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 import type { GenerationRequest, GenerationResponse, StreamChunk, ToolCallResult, LlmMessage, LlmMessagePart } from "../types";
 import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
@@ -236,7 +236,7 @@ export abstract class OpenAICompatibleProvider implements LlmProvider {
       }
     }
     } finally {
-      reader.cancel().catch(() => {});
+      cleanupStreamReader(reader, request.signal);
     }
   }
 

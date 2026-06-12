@@ -1,6 +1,6 @@
 import { OpenAICompatibleProvider } from "./openai-compatible";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 import type {
   GenerationRequest,
   GenerationResponse,
@@ -405,7 +405,7 @@ export class OpenAIProvider extends OpenAICompatibleProvider {
       }
     }
     } finally {
-      reader.cancel().catch(() => {});
+      cleanupStreamReader(reader, request.signal);
     }
   }
 }
