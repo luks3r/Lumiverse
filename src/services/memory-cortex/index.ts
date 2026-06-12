@@ -26,6 +26,7 @@ import {
 import { scoreChunkHeuristic } from "./salience-heuristic";
 import { extractWithSidecar, extractBatchWithSidecar, getToolChoiceParams, getExtractionStructuredParams } from "./salience-sidecar";
 import { createCortexSidecarGenerateRawAdapter } from "./sidecar-adapter";
+import { isCortexSidecarTimeout, withCortexSidecarTimeout } from "./sidecar-timeout";
 import { extractEntitiesHeuristic, extractMentionExcerpt, detectNicknameIntroductions } from "./entity-extractor";
 import { refineHeuristicDetections } from "./detection-refiner";
 import { filterEntitiesByExtractionFilters } from "./entity-extraction-filters";
@@ -1119,39 +1120,35 @@ export async function processChunk(
         }
 
         const sidecarTimeout = config.sidecarTimeoutMs ?? 30000;
-        const ac = sidecarTimeout > 0 ? new AbortController() : null;
-        const timer = ac ? setTimeout(() => {
-          console.warn("[memory-cortex] Sidecar extraction timed out, aborting LLM call");
-          ac.abort();
-        }, sidecarTimeout) : null;
 
         try {
-          extraction = await extractWithSidecar(
-            proseContent,
-            generateRawFn!,
-            sidecarConnectionId!,
-            {
-              characterNames,
-              knownEntities: entityContext,
-              arbiter: arbiterInput,
-              descriptionAliases: buildSidecarAliasList(descriptionAliases, knownEntities),
-              samplingParameters: buildSidecarSamplingParameters(config.sidecar),
-              tokenCounter: liveSidecarTokenCounter,
-              logTag: `live chunk=${data.chunkId.slice(0, 8)} attempt=${attempt + 1}/${maxAttempts}`,
-              throwOnFailure: true,
-              signal: ac?.signal,
-            },
+          extraction = await withCortexSidecarTimeout(
+            extractWithSidecar(
+              proseContent,
+              generateRawFn!,
+              sidecarConnectionId!,
+              {
+                characterNames,
+                knownEntities: entityContext,
+                arbiter: arbiterInput,
+                descriptionAliases: buildSidecarAliasList(descriptionAliases, knownEntities),
+                samplingParameters: buildSidecarSamplingParameters(config.sidecar),
+                tokenCounter: liveSidecarTokenCounter,
+                logTag: `live chunk=${data.chunkId.slice(0, 8)} attempt=${attempt + 1}/${maxAttempts}`,
+                throwOnFailure: true,
+              },
+            ),
+            sidecarTimeout,
+            () => console.warn("[memory-cortex] Sidecar extraction timed out; falling back without aborting LLM stream"),
           );
           lastErr = null;
           break;
         } catch (err: any) {
           lastErr = err;
-          const isAbort = err?.name === "AbortError" || ac?.signal.aborted;
+          const isAbort = isCortexSidecarTimeout(err);
           if (!isAbort) {
             console.warn(`[memory-cortex] Sidecar attempt ${attempt + 1}/${maxAttempts} failed:`, err?.message ?? err);
           }
-        } finally {
-          if (timer) clearTimeout(timer);
         }
       }
       timings.sidecarMs = performance.now() - sidecarStart;

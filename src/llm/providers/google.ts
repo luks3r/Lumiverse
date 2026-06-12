@@ -1,6 +1,6 @@
 import type { LlmProvider } from "../provider";
 import { COMMON_PARAMS, type ProviderCapabilities } from "../param-schema";
-import { cancelStreamAndCloseConnection, createCooperativeYielder, fetchWithPreflightAbort, readJsonWithAbort, readWithAbort } from "../stream-utils";
+import { cleanupStreamReader, createCooperativeYielder, fetchWithPreflightAbort, readWithAbort } from "../stream-utils";
 import { getTextContent, type GenerationRequest, type GenerationResponse, type StreamChunk, type ToolCallResult, type LlmMessage, type LlmMessagePart } from "../types";
 import { fetchProviderJson, ProviderRequestError, throwProviderResponseError } from "../../utils/provider-errors";
 
@@ -187,7 +187,7 @@ export class GoogleProvider implements LlmProvider {
       }
     }
     } finally {
-      if (!streamDoneNaturally) await cancelStreamAndCloseConnection(reader, res);
+      cleanupStreamReader(reader, request.signal);
     }
   }
 

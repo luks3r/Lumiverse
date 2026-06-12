@@ -1,0 +1,6 @@
+services:
+  lumiverse:
+    image: lumiverse:bun-stream-abort-fix
+    build:
+      context: .
+      dockerfile: Dockerfile

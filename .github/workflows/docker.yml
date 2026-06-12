@@ -1,7 +1,11 @@
 name: Build & Push Docker Image
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 on:
   push:
+    branches: ["bun-stream-abort-fix"]
     tags: ["v*"]
   schedule:
     # Weekly rebuild to refresh the CA certificate bundle baked into `:latest`.
@@ -34,8 +38,9 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/prolix-oc/lumiverse
+          images: ghcr.io/luks3r/lumiverse
           tags: |
+            type=ref,event=branch
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable={{is_default_branch}}

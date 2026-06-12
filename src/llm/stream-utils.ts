@@ -86,60 +86,24 @@ export async function readWithAbort<T>(
   });
 }
 
-// Hard ceiling on a buffered JSON response. Without this, a misconfigured or
-// hostile endpoint (a user-supplied embedding server, or a proxy returning a
-// huge chunked error page with no/false Content-Length) could grow the buffer
-// unbounded and OOM the single-process server. The cap is generous enough for
-// any realistic JSON API response; callers handling smaller payloads can pass
-// a tighter limit.
-const DEFAULT_MAX_JSON_BYTES = 64 * 1024 * 1024; // 64 MB
-
-// Read a non-streaming JSON response body via the same user-space abort path
-// the streaming providers use. The user signal is checked between reads instead
-// of being handed to Bun's fetch, and reader.cancel() is awaited so the
-// underlying HTTP connection is fully torn down before the response object
-// becomes eligible for GC — closing the window where Bun's HTTPThread can
-// dispatch a callback into freed memory. A byte cap bounds peak memory and
-// cancels the stream the instant it trips.
-export async function readJsonWithAbort<T>(
-  res: Response,
+export function cleanupStreamReader<T>(
+  reader: ReadableStreamDefaultReader<T>,
   signal: AbortSignal | undefined,
-  maxBytes: number = DEFAULT_MAX_JSON_BYTES,
-): Promise<T> {
-  if (!res.body) {
-    return (await res.json()) as T;
-  }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-  let total = 0;
-  let readToEnd = false;
-  try {
-    while (true) {
-      const { done, value } = await readWithAbort(reader, signal);
-      if (signal?.aborted) {
-        throw signal.reason ?? new DOMException("Aborted", "AbortError");
-      }
-      if (done) {
-        readToEnd = true;
-        break;
-      }
-      if (value) {
-        total += value.byteLength;
-        if (total > maxBytes) {
-          throw new Error(`Response body exceeded ${maxBytes} bytes`);
-        }
-        buffer += decoder.decode(value, { stream: true });
-      }
+): void {
+  // readWithAbort() intentionally resolves immediately when the user aborts,
+  // leaving the underlying native reader.read() to settle later. Calling
+  // reader.cancel() during that pending read has triggered Bun process crashes
+  // in the streaming generation path, so aborted streams are released only.
+  if (signal?.aborted) {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* ignore */
     }
-    buffer += decoder.decode();
-    return JSON.parse(buffer) as T;
-  } finally {
-    await reader.cancel().catch(() => {});
-    // Abandoned mid-body (user abort or byte cap): cancel() alone leaves the
-    // connection open and the server still sending — force it closed.
-    if (!readToEnd) closeConnection(res);
+    return;
   }
+
+  reader.cancel().catch(() => {});
 }
 
 // Streaming providers can emit a large number of tiny reasoning/text deltas in a
