@@ -8,7 +8,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build frontend (Vite + TypeScript)
 # ---------------------------------------------------------------------------
-FROM oven/bun:canary-slim AS frontend-build
+FROM oven/bun:1.3.14-slim AS frontend-build
 WORKDIR /app/frontend
 
 # Install dependencies first (cache layer)
@@ -35,7 +35,7 @@ RUN echo "frontend-refresh: ${FRONTEND_REFRESH}" && bun run build
 # ---------------------------------------------------------------------------
 # Stage 2: Install backend production dependencies
 # ---------------------------------------------------------------------------
-FROM oven/bun:canary-slim AS backend-deps
+FROM oven/bun:1.3.14-slim AS backend-deps
 
 WORKDIR /app
 
@@ -47,7 +47,7 @@ RUN bun install --production --frozen-lockfile
 # ---------------------------------------------------------------------------
 # Stage 3: Runtime
 # ---------------------------------------------------------------------------
-FROM oven/bun:canary-slim
+FROM oven/bun:1.3.14-slim
 
 # CA_REFRESH: cache-busting marker for the apt layer below. Bump (or pass via
 # --build-arg) to force apt-get to re-fetch the `ca-certificates` package so the
