@@ -42,12 +42,12 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/prolix-oc/lumiverse:staging
-            ghcr.io/prolix-oc/lumiverse:staging-${{ steps.refresh.outputs.sha }}
+            ghcr.io/luks3r/lumiverse:staging
+            ghcr.io/luks3r/lumiverse:staging-${{ steps.refresh.outputs.sha }}
           labels: |
             org.opencontainers.image.title=Lumiverse (staging)
             org.opencontainers.image.description=AI chat application server — staging branch build
-            org.opencontainers.image.source=https://github.com/prolix-oc/Lumiverse
+            org.opencontainers.image.source=https://github.com/luks3r/Lumiverse
             org.opencontainers.image.revision=${{ github.sha }}
           build-args: |
             CA_REFRESH=${{ steps.refresh.outputs.ca }}
